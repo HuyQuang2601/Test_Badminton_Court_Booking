@@ -50,8 +50,8 @@ Use:
 
 ```text
 JDBC URL: jdbc:h2:mem:badminton
-Username: sa
-Password: <empty>
+Username: root
+Password: 260106huy
 ```
 
 Useful tables to inspect:
@@ -64,6 +64,7 @@ SELECT * FROM TIME_SLOTS;
 SELECT * FROM BOOKINGS;
 SELECT * FROM REFRESH_TOKENS;
 SELECT * FROM TOKEN_BLACKLIST;
+SELECT * FROM PASSWORD_RESET_TOKENS;
 SELECT * FROM AUDIT_LOGS;
 ```
 
@@ -190,13 +191,17 @@ Expected:
 ```text
 HTTP 200
 data.accessToken exists
+data.refreshToken is different from the submitted refresh token
 ```
 
 Update:
 
 ```text
 customerToken = data.accessToken
+refreshToken = data.refreshToken
 ```
+
+Submitting the old refresh token again must return HTTP 401 and revoke the user's active refresh-token chain.
 
 ## 7. FR-04 Register Customer
 
@@ -526,7 +531,7 @@ Authorization: Bearer {{customerToken}}
 Check available courts:
 
 ```http
-GET {{baseUrl}}/api/v1/customer/bookings/available-courts?date=2026-06-10&timeSlotId=1
+GET {{baseUrl}}/api/v1/customer/bookings/available-courts?date=2026-06-20&timeSlotId=1
 Authorization: Bearer {{customerToken}}
 ```
 
@@ -550,7 +555,7 @@ Body:
 ```json
 {
   "courtId": 1,
-  "bookingDate": "2026-06-10",
+  "bookingDate": "2026-06-20",
   "timeSlotId": 1,
   "note": "Test booking"
 }
@@ -632,7 +637,7 @@ data.status = CONFIRMED
 Check confirmed bookings:
 
 ```http
-GET {{baseUrl}}/api/v1/manager/bookings?date=2026-06-10&status=CONFIRMED
+GET {{baseUrl}}/api/v1/manager/bookings?date=2026-06-20&status=CONFIRMED
 Authorization: Bearer {{managerToken}}
 ```
 
@@ -737,9 +742,19 @@ Only PNG and JPG images are allowed
 Note:
 
 ```text
-Current implementation uses dev cloud storage and returns a mock URL.
-This is enough to test API behavior, but not a real Cloudinary/S3 integration.
+The default dev provider returns a mock URL. To test real Cloudinary storage,
+set STORAGE_PROVIDER=cloudinary and configure the CLOUDINARY_* variables in .env.example.
 ```
+
+Upload multiple court images with form-data key `files`:
+
+```http
+POST {{baseUrl}}/api/v1/files/courts/1/images/multiple
+Authorization: Bearer {{managerToken}}
+Content-Type: multipart/form-data
+```
+
+The API accepts up to 5 PNG/JPG files, each no larger than 10 MB.
 
 ## 16. FR-10 Change Password And Forgot Password
 
@@ -802,12 +817,28 @@ Expected:
 ```text
 HTTP 200
 Message says reset instructions will be sent if email exists
+data.resetToken contains a token when PASSWORD_RESET_EXPOSE_TOKEN=true
 ```
 
-Note:
+Reset password:
+
+```http
+POST {{baseUrl}}/api/v1/auth/reset-password
+Content-Type: application/json
+```
+
+```json
+{
+  "token": "<data.resetToken from forgot-password>",
+  "newPassword": "resetPassword123"
+}
+```
+
+Expected:
 
 ```text
-Forgot password is currently a safe stub. It does not send real email or reset token.
+HTTP 200
+The reset token cannot be reused and all active refresh tokens are revoked.
 ```
 
 ## 17. FR-03 Logout And Token Blacklist
@@ -839,7 +870,7 @@ HTTP 403
 Token has been revoked
 ```
 
-Check H2:
+When `TOKEN_BLACKLIST_PROVIDER=database`, check H2:
 
 ```sql
 SELECT * FROM TOKEN_BLACKLIST;
@@ -850,6 +881,28 @@ Expected:
 ```text
 At least one row exists
 ```
+
+Redis is the default blacklist provider. On Windows, start the Memurai service and verify it with:
+
+```powershell
+Get-Service Memurai
+& 'C:\Program Files\Memurai\memurai-cli.exe' PING
+```
+
+After logout, inspect blacklist keys and TTL with:
+
+```powershell
+& 'C:\Program Files\Memurai\memurai-cli.exe' KEYS "token:blacklist:*"
+& 'C:\Program Files\Memurai\memurai-cli.exe' TTL "<key>"
+```
+
+Alternatively, run `docker compose up -d redis`, then verify the key with:
+
+```powershell
+docker exec badminton-redis redis-cli KEYS "token:blacklist:*"
+```
+
+Set `TOKEN_BLACKLIST_PROVIDER=database` only when a local Redis-compatible server is unavailable.
 
 ## 18. AOP Audit Log Test
 
@@ -973,6 +1026,6 @@ Advanced functions:
 
 | Code | Feature | Current status |
 | --- | --- | --- |
-| FR-11 | AOP logging | Partial: booking audit exists, full execution-time logging not yet implemented |
-| FR-12 | 10 unit tests | Not completed yet |
-| FR-13 | Redis TokenBlacklist | Not completed yet, currently DB blacklist |
+| FR-11 | AOP logging | Completed: booking audit plus execution-time logging for controllers/services |
+| FR-12 | 10 unit tests | Completed: 5 service tests and 5 controller tests, plus context test |
+| FR-13 | Redis TokenBlacklist | Completed: Redis provider with TTL; database provider remains available for local fallback |
